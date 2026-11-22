@@ -13,6 +13,7 @@ on:
         description: '固件版本字符串（写入文件名，默认即需求指定值）'
         required: true
         default: '10.28.2026 by Kiddin'
+        
   repository_dispatch:
 
 permissions:
