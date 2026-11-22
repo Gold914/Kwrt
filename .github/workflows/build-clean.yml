@@ -122,8 +122,25 @@ jobs:
                 --no-backup-if-mismatch -F 1 -i {}
 
           # 关键：替换 Kwrt 默认预装的一长串第三方插件，只留基础套件 + LuCI(nginx)
-          sed -i 's|^DEFAULT_PACKAGES:=.*|DEFAULT_PACKAGES:=base-files ca-bundle dropbear fstools libc libgcc libustream-mbedtls logd mtd netifd opkg procd ucert uclient-fetch sysntpd zlib luci-nginx luci-base luci-compat luci-lib-ipkg luci-lib-fs luci-app-firewall luci-app-package-manager luci-theme-bootstrap|' include/target.mk
+          # 注意 DEFAULT_PACKAGES:= 是多行反斜杠续行，必须整段替换；
+          # 若只替换首行会留下孤立的续行，导致 Makefile 报 "recipe commences before first target"，
+          # 进而设备 metadata 生成失败、任何设备都选不上。
+          awk '
+            /^DEFAULT_PACKAGES:=/ {
+              print "DEFAULT_PACKAGES:=base-files ca-bundle dropbear fstools libc libgcc libustream-mbedtls logd mtd netifd opkg procd ucert uclient-fetch sysntpd zlib luci-nginx luci-base luci-compat luci-lib-ipkg luci-lib-fs luci-app-firewall luci-app-package-manager luci-theme-bootstrap"
+              skip = 1
+              next
+            }
+            skip {
+              if ($0 ~ /\\$/) next
+              skip = 0
+              next
+            }
+            { print }
+          ' include/target.mk > include/target.mk.new
+          mv include/target.mk.new include/target.mk
           grep '^DEFAULT_PACKAGES:=' include/target.mk
+          sed -n '18,26p' include/target.mk
 
           # 只选一个设备，关闭 ALL_PROFILES / MULTI_PROFILE，杜绝 256M 版本
           cat > .config <<'EOF'
