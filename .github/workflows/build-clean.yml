@@ -130,7 +130,6 @@ jobs:
           # ---- Target: Cudy TR3000 v1 / 112M UBI only ----
           CONFIG_TARGET_mediatek=y
           CONFIG_TARGET_mediatek_filogic=y
-          CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-mod=y
           CONFIG_TARGET_MULTI_PROFILE=n
           CONFIG_TARGET_ALL_PROFILES=n
           CONFIG_TARGET_PER_DEVICE_ROOTFS=n
@@ -187,12 +186,34 @@ jobs:
 
           make defconfig
 
+          # OpenWrt 25.12 的设备 Kconfig 符号由 target metadata 动态生成，
+          # 命名在不同版本/补丁组合下可能变化，因此从生成文件里自动发现。
+          echo "===== device symbols containing tr3000 ====="
+          grep -nE '^config[[:space:]]+TARGET.*tr3000' tmp/.config-target.in || true
+          dev_sym="$(grep -E '^config[[:space:]]+' tmp/.config-target.in \
+            | grep -Ei 'tr3000.*mod' \
+            | awk '{print $2}' \
+            | grep -v '^TARGET_DEVICE_' \
+            | head -1)"
+          [ -n "$dev_sym" ] || { echo "Could not discover 112M device config symbol"; exit 1; }
+          echo "Discovered 112M device symbol: $dev_sym"
+
+          # 先关闭全部设备 profile，再精确打开目标设备，保证只有一个镜像
+          {
+            awk '/^config[[:space:]]+TARGET_/ {print $2}' tmp/.config-target.in \
+              | grep -E '_DEVICE_' \
+              | grep -v '^TARGET_DEVICE_' \
+              | sed 's/^/CONFIG_/; s/$/=n/'
+            echo "CONFIG_${dev_sym}=y"
+          } >> .config
+          make defconfig
+
           echo "===== selected target devices ====="
           awk '/^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_/ && /=y$/ {print}' .config
           dev_count="$(awk '/^CONFIG_TARGET_[A-Za-z0-9_]+_DEVICE_/ && /=y$/ {n++} END{print n+0}' .config)"
           [ "$dev_count" = "1" ] || { echo "Expected exactly 1 target device, got $dev_count"; exit 1; }
-          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_tr3000-mod=y$' .config \
-            || { echo "112M device cudy_tr3000-mod was NOT selected"; exit 1; }
+          grep -q "^CONFIG_${dev_sym}=y\$" .config \
+            || { echo "112M device ${dev_sym} was NOT selected"; exit 1; }
           grep -q 'v1 112M' target/linux/mediatek/dts/mt7981b-cudy-tr3000-mod.dts \
             || { echo "112M DTS is missing after patches"; exit 1; }
 
