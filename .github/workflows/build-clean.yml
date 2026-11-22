@@ -1,0 +1,250 @@
+#=================================================
+# 基于 kiddin9/Kwrt (MIT) 自带的 25.12 构建体系改造
+# 目标：Cudy TR3000 v1 / 128MB NAND / 112MB UBI 布局 / mediatek-filogic / aarch64_cortex-a53
+# 只产出干净底包：OpenWrt 基础套件 + LuCI(nginx)，不含 Kwrt 默认预装的一堆第三方插件
+#=================================================
+
+name: Build clean Kwrt - Cudy TR3000 v1 112M
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '固件版本字符串（写入文件名，默认即需求指定值）'
+        required: true
+        default: '10.28.2026 by Kiddin'
+  repository_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Shanghai
+  TARGET_DIR: mediatek_filogic
+  DEVICE: cudy_tr3000-mod
+  IMAGE_NAME: kwrt-${{ inputs.version || '10.28.2026 by Kiddin' }}-mediatek-filogic-cudy_tr3000-v1-112M-squashfs-sysupgrade.bin
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Kwrt fork (25.12)
+        uses: actions/checkout@v4
+        with:
+          ref: 25.12
+          fetch-depth: 1
+
+      - name: Free disk space
+        uses: coder-xiaomo/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget dwarves \
+            llvm python3-pyelftools libpython3-dev aria2 jq qemu-utils rename \
+            libelf-dev device-tree-compiler libgmp3-dev libmpc-dev libfuse-dev
+          sudo -E apt-get -qq autoremove --purge
+          sudo -E apt-get -qq clean
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Clone OpenWrt 25.12 source
+        run: |
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt.git openwrt
+
+      - name: Prepare clean build tree
+        run: |
+          set -euxo pipefail
+
+          # 与上游 workflow 一致：先把 Kwrt 的 common / target 覆盖层拷入 OpenWrt
+          mkdir -p openwrt
+          cp -rf devices/common/. openwrt/
+          cp -rf devices/${TARGET_DIR}/. openwrt/
+          cp -rf devices openwrt/
+
+          cd openwrt
+
+          # diy.sh 用到的辅助函数（上游 workflow 中定义，这里保持一致）
+          function git_clone_path() {
+            trap 'rm -rf "$tmpdir"' EXIT
+            branch="$1" rurl="$2" mv="$3"
+            [[ "$mv" != "mv" ]] && shift 2 || shift 3
+            rootdir="$PWD"
+            tmpdir="$(mktemp -d)" || exit 1
+            if [ ${#branch} -lt 10 ]; then
+              git clone -b "$branch" --depth 1 --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+            else
+              git clone --filter=blob:none --sparse "$rurl" "$tmpdir"
+              cd "$tmpdir"
+              git checkout "$branch"
+            fi
+            if [ "$?" != 0 ]; then echo "error on $rurl"; exit 1; fi
+            git sparse-checkout init --cone
+            git sparse-checkout set "$@"
+            [[ "$mv" != "mv" ]] && cp -rn ./* "$rootdir"/ || mv -n "$@"/* "$rootdir"/"$@"/
+            cd "$rootdir"
+          }
+          export -f git_clone_path
+
+          export REPO_TOKEN="${{ secrets.TOKEN_KIDDIN9 }}"
+          export TARGET="${TARGET_DIR}"
+
+          chmod +x devices/common/diy.sh
+          /bin/bash devices/common/diy.sh
+          cp -f devices/common/.config .config
+          cat devices/${TARGET_DIR}/.config >> .config 2>/dev/null || true
+          if [ -f devices/${TARGET_DIR}/diy.sh ]; then
+            chmod +x devices/${TARGET_DIR}/diy.sh
+            /bin/bash devices/${TARGET_DIR}/diy.sh
+          fi
+          cp -Rf ./diy/* ./ 2>/dev/null || true
+
+          # 套用 Kwrt 自带补丁（含把 TR3000 改成 112M 布局的 01-360t7.patch / tr3000-mod.patch）
+          cp -rn devices/common/patches devices/${TARGET_DIR}/ 2>/dev/null || true
+          find devices/${TARGET_DIR}/patches -maxdepth 1 -type f -name '*.patch' \
+            ! -name '*.revert.patch' ! -name '*.bin.patch' -print0 \
+            | sort -z | xargs -0 -r -I{} patch -p1 --forward --batch \
+                --no-backup-if-mismatch -F 1 -i {}
+
+          # 关键：替换 Kwrt 默认预装的一长串第三方插件，只留基础套件 + LuCI(nginx)
+          sed -i 's|^DEFAULT_PACKAGES:=.*|DEFAULT_PACKAGES:=base-files ca-bundle dropbear fstools libc libgcc libustream-mbedtls logd mtd netifd opkg procd ucert uclient-fetch sysntpd zlib luci-nginx luci-base luci-compat luci-lib-ipkg luci-lib-fs luci-app-firewall luci-app-package-manager luci-theme-bootstrap|' include/target.mk
+          grep '^DEFAULT_PACKAGES:=' include/target.mk
+
+          # 只选一个设备，关闭 ALL_PROFILES / MULTI_PROFILE，杜绝 256M 版本
+          cat > .config <<'EOF'
+          # ---- Target: Cudy TR3000 v1 / 112M UBI only ----
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_filogic=y
+          CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-mod=y
+          CONFIG_TARGET_MULTI_PROFILE=n
+          CONFIG_TARGET_ALL_PROFILES=n
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=n
+
+          # ---- Images / rootfs ----
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_TARGET_ROOTFS_TARGZ=n
+          CONFIG_TARGET_ROOTFS_CPIOGZ=n
+          CONFIG_TARGET_ROOTFS_EXT4FS=n
+          CONFIG_TARGET_ROOTFS_INITRAMFS=n
+          CONFIG_TARGET_IMAGES_GZIP=n
+          CONFIG_JSON_OVERVIEW_IMAGE_INFO=y
+
+          # ---- Build options ----
+          CONFIG_USE_APK=n
+          CONFIG_ALL_NONSHARED=n
+          CONFIG_SIGNED_PACKAGES=n
+          CONFIG_SIGNATURE_CHECK=n
+          CONFIG_IPV6=y
+          CONFIG_KERNEL_WERROR=n
+          CONFIG_DEVEL=n
+          CONFIG_CCACHE=n
+          CONFIG_IB=n
+          CONFIG_IB_STANDALONE=n
+          CONFIG_BUSYBOX_CUSTOM=n
+          CONFIG_IMAGEOPT=y
+          CONFIG_VERSIONOPT=y
+          CONFIG_VERSION_DIST="Kwrt"
+          CONFIG_VERSION_MANUFACTURER="Kiddin'"
+          CONFIG_VERSION_HOME_URL="https://openwrt.ai/"
+          CONFIG_VERSION_REPO="https://dl.openwrt.ai/releases/25.12"
+          CONFIG_VERSION_FILENAMES=n
+          CONFIG_VERSION_CODE_FILENAMES=n
+
+          # ---- Clean LuCI (nginx web UI, no third-party apps) ----
+          CONFIG_PACKAGE_luci-nginx=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_luci-lib-ipkg=y
+          CONFIG_PACKAGE_luci-lib-fs=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-package-manager=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_LUCI_LANG_en=y
+          CONFIG_PACKAGE_my-default-settings=y
+
+          # ---- Base network only ----
+          CONFIG_PACKAGE_dnsmasq=n
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_dnsmasq_full_dhcp=y
+          CONFIG_PACKAGE_dnsmasq_full_ipset=y
+          EOF
+
+          make defconfig
+
+          echo "===== selected target devices ====="
+          awk '/^CONFIG_TARGET_DEVICE_/ && /=y$/ {print}' .config
+          dev_count="$(awk '/^CONFIG_TARGET_DEVICE_/ && /=y$/ {n++} END{print n+0}' .config)"
+          [ "$dev_count" = "1" ] || { echo "Expected exactly 1 target device, got $dev_count"; exit 1; }
+          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_cudy_tr3000-mod=y$' .config \
+            || { echo "112M device cudy_tr3000-mod was NOT selected"; exit 1; }
+          grep -q 'v1 112M' target/linux/mediatek/dts/mt7981b-cudy-tr3000-mod.dts \
+            || { echo "112M DTS is missing after patches"; exit 1; }
+
+      - name: Compile firmware
+        run: |
+          set -o pipefail
+          cd openwrt
+          echo "Build threads: $(( $(nproc) + 1 ))"
+          make -j$(( $(nproc) + 1 )) 2>&1 | tee build.log || {
+            echo "Parallel build failed, retrying with V=s -j1 ..."
+            make V=s -j1
+          }
+
+      - name: Verify and rename image
+        run: |
+          set -euxo pipefail
+          cd openwrt
+          BIN="bin/targets/mediatek/filogic"
+
+          echo "===== generated images ====="
+          find "$BIN" -maxdepth 1 -type f -printf '%f\n' | sort
+
+          if find "$BIN" -maxdepth 1 -type f | grep -qi '256mb'; then
+            echo "ERROR: a 256M image was generated - refusing to publish"
+            exit 1
+          fi
+
+          mapfile -t imgs < <(find "$BIN" -maxdepth 1 -type f -name '*-squashfs-sysupgrade.bin' | sort)
+          [ "${#imgs[@]}" -eq 1 ] || {
+            echo "ERROR: expected exactly 1 sysupgrade.bin, got ${#imgs[@]}"
+            exit 1
+          }
+          src="${imgs[0]}"
+
+          mkdir -p artifact
+          cp "$src" "artifact/${IMAGE_NAME}"
+          cp .config artifact/build.config
+          sha256sum "artifact/${IMAGE_NAME}" > artifact/SHA256.txt
+          cat artifact/SHA256.txt
+
+          echo "### 干净底包编译完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 文件：\`${IMAGE_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 设备：Cudy TR3000 v1 (112M UBI)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA256：\`$(cut -d' ' -f1 artifact/SHA256.txt)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwrt-tr3000-v1-112M-clean
+          path: |
+            openwrt/artifact/${{ env.IMAGE_NAME }}
+            openwrt/artifact/build.config
+            openwrt/artifact/SHA256.txt
+          if-no-files-found: error
+          retention-days: 30
