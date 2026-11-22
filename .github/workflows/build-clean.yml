@@ -114,6 +114,12 @@ jobs:
           fi
           cp -Rf ./diy/* ./ 2>/dev/null || true
 
+          # 关键修复：Kwrt 的 common/diy.sh 会把 kiddin9 feed 里 luci-nginx 的依赖
+          # 从 +nginx 改成 +nginx-ssl，和自身形成 Kconfig 递归依赖，导致 defconfig
+          # 把 luci-nginx / nginx / nginx-ssl / uwsgi 全部关掉（镜像里没有任何 Web 服务）。
+          # 移除 kiddin9 的 luci-nginx 覆盖，让 OpenWrt 官方 luci-nginx(+nginx) 生效。
+          rm -f package/feeds/kiddin9/luci-nginx
+
           # 套用 Kwrt 自带补丁（含把 TR3000 改成 112M 布局的 01-360t7.patch / tr3000-mod.patch）
           cp -rn devices/common/patches devices/${TARGET_DIR}/ 2>/dev/null || true
           find devices/${TARGET_DIR}/patches -maxdepth 1 -type f -name '*.patch' \
@@ -127,7 +133,7 @@ jobs:
           # 进而设备 metadata 生成失败、任何设备都选不上。
           awk '
             /^DEFAULT_PACKAGES:=/ {
-              print "DEFAULT_PACKAGES:=base-files ca-bundle dropbear fstools libc libgcc libustream-mbedtls logd mtd netifd opkg procd ucert uclient-fetch sysntpd zlib luci-nginx luci-base luci-compat luci-lib-ipkg luci-lib-fs luci-app-firewall luci-app-package-manager luci-theme-bootstrap"
+              print "DEFAULT_PACKAGES:=base-files ca-bundle dropbear fstools libc libgcc libustream-mbedtls logd mtd netifd opkg procd ucert uclient-fetch sysntpd zlib luci-nginx nginx nginx-mod-luci luci-base luci-compat luci-lib-ipkg luci-lib-fs luci-app-firewall luci-app-package-manager luci-theme-bootstrap"
               skip = 1
               next
             }
@@ -182,7 +188,10 @@ jobs:
           CONFIG_VERSION_CODE_FILENAMES=n
 
           # ---- Clean LuCI (nginx web UI, no third-party apps) ----
+          # 显式启用依赖，防止再次被 Kconfig 依赖解析关掉
           CONFIG_PACKAGE_luci-nginx=y
+          CONFIG_PACKAGE_nginx=y
+          CONFIG_PACKAGE_nginx-mod-luci=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-compat=y
           CONFIG_PACKAGE_luci-lib-ipkg=y
