@@ -1,7 +1,8 @@
 #=================================================
 # 基于 kiddin9/Kwrt (MIT) 自带的 25.12 构建体系改造
 # 目标：Cudy TR3000 v1 / 128MB NAND / 112MB UBI 布局 / mediatek-filogic / aarch64_cortex-a53
-# 只产出干净底包：OpenWrt 基础套件 + LuCI，不含 Kwrt 默认预装的一堆第三方插件
+# 完整版：保留 Kwrt/openwrt.ai 官方全部默认包（与官方 45MB 镜像一致），
+# 仅限制为单一设备 Cudy TR3000 v1 112M，杜绝 256M 镜像。
 #=================================================
 
 name: Build clean Kwrt - Cudy TR3000 v1 112M
@@ -114,10 +115,8 @@ jobs:
           fi
           cp -Rf ./diy/* ./ 2>/dev/null || true
 
-          # Web 服务改用 OpenWrt 官方核心包 uhttpd（不依赖 kiddin9 的 nginx 链）。
-          # kiddin9 feed 里 luci-nginx / nginx-ssl / minigate / lighttpd 等存在大量
-          # Kconfig 递归依赖，defconfig 会把整条 nginx 链关掉，导致镜像无 Web 服务。
-          # 具体关闭项写在下面的 .config heredoc 中；uhttpd 依赖干净且一定会被选中。
+          # 完整版：Web 服务沿用 Kwrt 官方默认的 luci-nginx（与 openwrt.ai 一致）。
+          # 不删任何包、不关任何服务，避免 Kconfig 递归依赖与默认网络栈缺失。
 
           # 套用 Kwrt 自带补丁（含把 TR3000 改成 112M 布局的 01-360t7.patch / tr3000-mod.patch）
           cp -rn devices/common/patches devices/${TARGET_DIR}/ 2>/dev/null || true
@@ -126,100 +125,36 @@ jobs:
             | sort -z | xargs -0 -r -I{} patch -p1 --forward --batch \
                 --no-backup-if-mismatch -F 1 -i {}
 
-          # 关键：替换 Kwrt 默认预装的一长串第三方插件，只留基础套件 + LuCI
-          # 注意 DEFAULT_PACKAGES:= 是多行反斜杠续行，必须整段替换；
-          # 若只替换首行会留下孤立的续行，导致 Makefile 报 "recipe commences before first target"，
-          # 进而设备 metadata 生成失败、任何设备都选不上。
-          awk '
-            /^DEFAULT_PACKAGES:=/ {
-              print "DEFAULT_PACKAGES:=base-files ca-bundle dropbear fstools libc libgcc libustream-mbedtls logd mtd netifd opkg procd ucert uclient-fetch sysntpd zlib uhttpd rpcd luci-base luci-compat luci-lib-ipkg luci-lib-fs luci-app-firewall luci-app-package-manager luci-theme-bootstrap"
-              skip = 1
-              next
-            }
-            skip {
-              if ($0 ~ /\\$/) next
-              skip = 0
-              next
-            }
-            { print }
-          ' include/target.mk > include/target.mk.new
-          mv include/target.mk.new include/target.mk
+          # 完整版：保留 Kwrt/openwrt.ai 官方全部默认包（约 45MB 镜像）。
+          # 此前"干净底包"用 cat > .config 完全重写配置 + awk 替换 DEFAULT_PACKAGES，
+          # 砍掉了 dnsmasq-full/my-default-settings/luci-nginx 等，
+          # 导致刷机后 DHCP 失效、网口无配置、红X进不去。
+          # 现在 .config 已由上面 cp devices/common/.config + cat target/.config 就位，
+          # 这里只在末尾「追加」单设备/112M 限制，绝不覆盖，完整保留官方默认包。
+          echo "===== stock config lines count (before append) ====="
+          wc -l .config
+          echo "===== key stock packages present ====="
+          grep -E '^CONFIG_PACKAGE_(luci-nginx|dnsmasq-full|my-default-settings|luci-base)=y$' .config || true
+          echo "===== DEFAULT_PACKAGES (kept intact) ====="
           grep '^DEFAULT_PACKAGES:=' include/target.mk
-          sed -n '18,26p' include/target.mk
 
-          # 只选一个设备，关闭 ALL_PROFILES / MULTI_PROFILE，杜绝 256M 版本
-          cat > .config <<'EOF'
-          # ---- Target: Cudy TR3000 v1 / 112M UBI only ----
-          CONFIG_TARGET_mediatek=y
-          CONFIG_TARGET_mediatek_filogic=y
+          # 只追加：单设备编译，关闭 ALL_PROFILES / MULTI_PROFILE，杜绝 256M 镜像
+          cat >> .config <<'EOF'
+
+          # ---- Single-device override (appended, stock config preserved) ----
           CONFIG_TARGET_MULTI_PROFILE=n
           CONFIG_TARGET_ALL_PROFILES=n
           CONFIG_TARGET_PER_DEVICE_ROOTFS=n
-
-          # ---- Images / rootfs ----
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
           CONFIG_TARGET_ROOTFS_TARGZ=n
           CONFIG_TARGET_ROOTFS_CPIOGZ=n
           CONFIG_TARGET_ROOTFS_EXT4FS=n
           CONFIG_TARGET_ROOTFS_INITRAMFS=n
           CONFIG_TARGET_IMAGES_GZIP=n
-          CONFIG_JSON_OVERVIEW_IMAGE_INFO=y
-
-          # ---- Build options ----
-          CONFIG_USE_APK=n
-          CONFIG_ALL_NONSHARED=n
-          CONFIG_SIGNED_PACKAGES=n
-          CONFIG_SIGNATURE_CHECK=n
-          CONFIG_IPV6=y
-          CONFIG_KERNEL_WERROR=n
-          CONFIG_DEVEL=n
-          CONFIG_CCACHE=n
           CONFIG_IB=n
           CONFIG_IB_STANDALONE=n
-          CONFIG_BUSYBOX_CUSTOM=n
-          CONFIG_IMAGEOPT=y
-          CONFIG_VERSIONOPT=y
-          CONFIG_VERSION_DIST="Kwrt"
-          CONFIG_VERSION_MANUFACTURER="Kiddin'"
-          CONFIG_VERSION_HOME_URL="https://openwrt.ai/"
-          CONFIG_VERSION_REPO="https://dl.openwrt.ai/releases/25.12"
-          CONFIG_VERSION_FILENAMES=n
-          CONFIG_VERSION_CODE_FILENAMES=n
-
-          # ---- Clean LuCI (uhttpd web UI, no third-party apps) ----
-          # 用官方核心包 uhttpd 做 Web 服务，依赖干净、不受 kiddin9 插件递归依赖影响
-          CONFIG_PACKAGE_uhttpd=y
-          CONFIG_PACKAGE_uhttpd-mod-ubus=y
-          CONFIG_PACKAGE_rpcd=y
-          CONFIG_PACKAGE_luci-base=y
-          CONFIG_PACKAGE_luci-compat=y
-          CONFIG_PACKAGE_luci-lib-ipkg=y
-          CONFIG_PACKAGE_luci-lib-fs=y
-          CONFIG_PACKAGE_luci-app-firewall=y
-          CONFIG_PACKAGE_luci-app-package-manager=y
-          CONFIG_PACKAGE_luci-theme-bootstrap=y
-          CONFIG_LUCI_LANG_zh_Hans=y
-          CONFIG_LUCI_LANG_en=y
-          CONFIG_PACKAGE_my-default-settings=y
-
-          # 显式关闭 kiddin9 里带递归依赖、会把 Web 服务整条链搞掉的 nginx/lighttpd 系
-          CONFIG_PACKAGE_luci-nginx=n
-          CONFIG_PACKAGE_nginx=n
-          CONFIG_PACKAGE_nginx-ssl=n
-          CONFIG_PACKAGE_nginx-full=n
-          CONFIG_PACKAGE_nginx-mod-luci=n
-          CONFIG_PACKAGE_uwsgi=n
-          CONFIG_PACKAGE_luci-app-nginx=n
-          CONFIG_PACKAGE_luci-nginxer=n
-          CONFIG_PACKAGE_luci-lighttpd=n
-          CONFIG_PACKAGE_lighttpd=n
-          CONFIG_PACKAGE_minigate=n
-
-          # ---- Base network only ----
-          CONFIG_PACKAGE_dnsmasq=n
-          CONFIG_PACKAGE_dnsmasq-full=y
-          CONFIG_PACKAGE_dnsmasq_full_dhcp=y
-          CONFIG_PACKAGE_dnsmasq_full_ipset=y
+          CONFIG_CCACHE=n
+          CONFIG_DEVEL=n
           EOF
 
           make defconfig
@@ -255,16 +190,20 @@ jobs:
           grep -q 'v1 112M' target/linux/mediatek/dts/mt7981b-cudy-tr3000-mod.dts \
             || { echo "112M DTS is missing after patches"; exit 1; }
 
-          # 强断言：Web 服务必须真的被选中，否则立即失败，不等 45 分钟编译
-          echo "===== web server symbols in .config ====="
-          grep -E '^CONFIG_PACKAGE_(uhttpd|luci-base|rpcd)=y$' .config || true
-          grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config \
-            || { echo "FATAL: uhttpd NOT selected - image would have no Web UI"; exit 1; }
+          # 强断言：完整版的 Web 服务 + 网络栈必须真的被选中，否则立即失败，不等 45 分钟编译
+          echo "===== web/network server symbols in .config ====="
+          grep -E '^CONFIG_PACKAGE_(luci-nginx|nginx|luci-base|dropbear|dnsmasq-full|my-default-settings)=y$' .config || true
+          grep -qE '^CONFIG_PACKAGE_(luci-nginx|uhttpd)=y$' .config \
+            || { echo "FATAL: no Web server (luci-nginx/uhttpd) selected"; exit 1; }
           grep -q '^CONFIG_PACKAGE_luci-base=y$' .config \
             || { echo "FATAL: luci-base NOT selected - image would have no LuCI"; exit 1; }
           grep -q '^CONFIG_PACKAGE_dropbear=y$' .config \
             || { echo "FATAL: dropbear NOT selected - image would have no SSH"; exit 1; }
-          echo "OK: Web UI (uhttpd+luci-base) and SSH (dropbear) confirmed in config"
+          grep -qE '^CONFIG_PACKAGE_dnsmasq(-full)?=y$' .config \
+            || { echo "FATAL: dnsmasq NOT selected - image would have no DHCP/DNS"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_my-default-settings=y$' .config \
+            || { echo "FATAL: my-default-settings NOT selected - LAN/10.0.0.1 config missing"; exit 1; }
+          echo "OK: full stock Web UI + SSH + DHCP/DNS + my-default-settings confirmed in config"
 
       - name: Compile firmware
         run: |
