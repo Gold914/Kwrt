@@ -165,6 +165,9 @@ jobs:
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_uhttpd-mod-ubus=y
           CONFIG_PACKAGE_rpcd=y
+          # Kwrt 官方 .config 不带 dropbear，25.12 默认包默认项在多次 defconfig 后
+          # 可能不被选中（Run#9 就是这样失败的），这里必须显式打开 SSH。
+          CONFIG_PACKAGE_dropbear=y
           EOF
 
           make defconfig
@@ -189,6 +192,21 @@ jobs:
               | sed 's/^/CONFIG_/; s/$/=n/'
             echo "CONFIG_${dev_sym}=y"
           } >> .config
+          make defconfig
+
+          # 第二次 defconfig（按设备收敛）会重算包默认项。Run#9 就是这个阶段把
+          # dropbear 弄丢了。这里再显式强制一次关键包，并重新生成配置。
+          cat >> .config <<'EOF'
+
+          # ---- Critical packages forced after device defconfig ----
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_rpcd=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_my-default-settings=y
+          EOF
           make defconfig
 
           echo "===== selected target devices ====="
