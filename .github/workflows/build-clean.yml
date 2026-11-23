@@ -206,6 +206,10 @@ jobs:
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_my-default-settings=y
+          # Run#10: 完整版 Kconfig 递归依赖把 libmbedtls 也弄丢了，
+          # 导致 libustream-mbedtls(默认 TLS 变体) 找不到 mbedtls 库而编译失败。
+          CONFIG_PACKAGE_libmbedtls=y
+          CONFIG_PACKAGE_libustream-mbedtls=y
           EOF
           make defconfig
 
@@ -220,7 +224,7 @@ jobs:
 
           # 强断言：完整版的 Web 服务 + 网络栈必须真的被选中，否则立即失败，不等 45 分钟编译
           echo "===== web/network server symbols in .config ====="
-          grep -E '^CONFIG_PACKAGE_(uhttpd|luci-nginx|nginx|luci-base|dropbear|dnsmasq-full|my-default-settings)=y$' .config || true
+          grep -E '^CONFIG_PACKAGE_(uhttpd|luci-nginx|nginx|luci-base|dropbear|dnsmasq-full|my-default-settings|libmbedtls|libustream-mbedtls)=y$' .config || true
           grep -q '^CONFIG_PACKAGE_uhttpd=y$' .config \
             || { echo "FATAL: uhttpd NOT selected - image would have no Web UI"; exit 1; }
           grep -q '^CONFIG_PACKAGE_luci-base=y$' .config \
@@ -231,7 +235,11 @@ jobs:
             || { echo "FATAL: dnsmasq NOT selected - image would have no DHCP/DNS"; exit 1; }
           grep -q '^CONFIG_PACKAGE_my-default-settings=y$' .config \
             || { echo "FATAL: my-default-settings NOT selected - LAN/10.0.0.1 config missing"; exit 1; }
-          echo "OK: full stock Web UI + SSH + DHCP/DNS + my-default-settings confirmed in config"
+          grep -q '^CONFIG_PACKAGE_libmbedtls=y$' .config \
+            || { echo "FATAL: libmbedtls NOT selected - ustream-ssl mbedtls build will fail"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_libustream-mbedtls=y$' .config \
+            || { echo "FATAL: libustream-mbedtls NOT selected - default TLS variant missing"; exit 1; }
+          echo "OK: full stock Web UI + SSH + DHCP/DNS + TLS libs + my-default-settings confirmed in config"
 
       - name: Compile firmware
         run: |
